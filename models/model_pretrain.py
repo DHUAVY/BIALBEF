@@ -18,13 +18,14 @@ import random
 
 
 class ALBEF(nn.Module):
-    def __init__(self,                 
-                 text_encoder = None,
-                 tokenizer = None,
-                 config = None,    
-                 temp = 0.07,
-                 init_deit = True
-                 ):
+    def __init__(
+        self,                 
+        text_encoder = None,
+        tokenizer = None,
+        config = None,    
+        temp = 0.07,
+        init_deit = True):
+        
         super().__init__()
         
         self.tokenizer = tokenizer 
@@ -32,13 +33,22 @@ class ALBEF(nn.Module):
         embed_dim = config['embed_dim']
      
         self.visual_encoder = VisionTransformer(
-            img_size=config['image_res'], patch_size=16, embed_dim=768, depth=12, num_heads=12, 
-            mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6))   
+            img_size=config['image_res'], 
+            patch_size=16, 
+            embed_dim=768, 
+            depth=12, 
+            num_heads=12, 
+            mlp_ratio=4, 
+            qkv_bias=True, 
+            norm_layer=partial(nn.LayerNorm, eps=1e-6)
+        )   
         
         if init_deit:
             checkpoint = torch.hub.load_state_dict_from_url(
                 url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
-                map_location="cpu", check_hash=True)
+                map_location="cpu", 
+                check_hash=True
+            )
             state_dict = checkpoint["model"]
             pos_embed_reshaped = interpolate_pos_embed(state_dict['pos_embed'], self.visual_encoder)
             state_dict['pos_embed'] = pos_embed_reshaped
@@ -48,7 +58,10 @@ class ALBEF(nn.Module):
         vision_width = config['vision_width']       
         bert_config = BertConfig.from_json_file(config['bert_config'])
         
-        self.text_encoder = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)      
+        self.text_encoder = BertForMaskedLM.from_pretrained(
+                                text_encoder, 
+                                config=bert_config
+                            )      
 
         text_width = self.text_encoder.config.hidden_size
         self.vision_proj = nn.Linear(vision_width, embed_dim)
@@ -56,22 +69,30 @@ class ALBEF(nn.Module):
 
         self.temp = nn.Parameter(torch.ones([]) * config['temp'])   
         self.queue_size = config['queue_size']
-        self.momentum = config['momentum']  
+        self.momentum = config['momentum']
         self.itm_head = nn.Linear(text_width, 2)     
 
         # create momentum models
         self.visual_encoder_m = VisionTransformer(
-            img_size=config['image_res'], patch_size=16, embed_dim=768, depth=12, num_heads=12, 
-            mlp_ratio=4, qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6)) 
+            img_size=config['image_res'], 
+            patch_size=16, 
+            embed_dim=768, 
+            depth=12, 
+            num_heads=12, 
+            mlp_ratio=4, 
+            qkv_bias=True, 
+            norm_layer=partial(nn.LayerNorm, eps=1e-6)
+        ) 
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
         self.text_encoder_m = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)       
         self.text_proj_m = nn.Linear(text_width, embed_dim)    
         
-        self.model_pairs = [[self.visual_encoder,self.visual_encoder_m],
-                            [self.vision_proj,self.vision_proj_m],
-                            [self.text_encoder,self.text_encoder_m],
-                            [self.text_proj,self.text_proj_m],
-                           ]
+        self.model_pairs = [
+            [self.visual_encoder,self.visual_encoder_m],
+            [self.vision_proj,self.vision_proj_m],
+            [self.text_encoder,self.text_encoder_m],
+            [self.text_proj,self.text_proj_m],
+        ]
         
         self.copy_params()
 
@@ -94,8 +115,13 @@ class ALBEF(nn.Module):
 
         image_feat = F.normalize(self.vision_proj(image_embeds[:,0,:]),dim=-1)  
 
-        text_output = self.text_encoder.bert(text.input_ids, attention_mask = text.attention_mask,                      
-                                        return_dict = True, mode = 'text')            
+        text_output = self.text_encoder.bert(
+            text.input_ids, 
+            attention_mask = text.attention_mask,                      
+            return_dict = True, 
+            mode = 'text'
+        )      
+              
         text_embeds = text_output.last_hidden_state
         text_feat = F.normalize(self.text_proj(text_embeds[:,0,:]),dim=-1)                 
              
@@ -105,6 +131,7 @@ class ALBEF(nn.Module):
             image_embeds_m = self.visual_encoder_m(image) 
             image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:,0,:]),dim=-1)  
             image_feat_all = torch.cat([image_feat_m.t(),self.image_queue.clone().detach()],dim=1)                                         
+            
             text_output_m = self.text_encoder_m.bert(text.input_ids, attention_mask = text.attention_mask,                      
                                                 return_dict = True, mode = 'text')    
             text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:,0,:]),dim=-1) 
@@ -131,13 +158,15 @@ class ALBEF(nn.Module):
 
         ###=================================###
         # forward the positve image-text pair
-        output_pos = self.text_encoder.bert(encoder_embeds = text_embeds, 
-                                        attention_mask = text.attention_mask,
-                                        encoder_hidden_states = image_embeds,
-                                        encoder_attention_mask = image_atts,      
-                                        return_dict = True,
-                                        mode = 'fusion',
-                                       )            
+        output_pos = self.text_encoder.bert(
+            encoder_embeds = text_embeds, 
+            attention_mask = text.attention_mask,
+            encoder_hidden_states = image_embeds,
+            encoder_attention_mask = image_atts,      
+            return_dict = True,
+            mode = 'fusion',
+        )            
+        
         with torch.no_grad():
             bs = image.size(0)          
             weights_i2t = F.softmax(sim_i2t[:,:bs],dim=1)
@@ -169,19 +198,23 @@ class ALBEF(nn.Module):
         image_embeds_all = torch.cat([image_embeds_neg,image_embeds],dim=0)
         image_atts_all = torch.cat([image_atts,image_atts],dim=0)
 
-        output_neg = self.text_encoder.bert(encoder_embeds = text_embeds_all, 
-                                        attention_mask = text_atts_all,
-                                        encoder_hidden_states = image_embeds_all,
-                                        encoder_attention_mask = image_atts_all,      
-                                        return_dict = True,
-                                        mode = 'fusion',
-                                       )                         
+        output_neg = self.text_encoder.bert(
+            encoder_embeds = text_embeds_all, 
+            attention_mask = text_atts_all,
+            encoder_hidden_states = image_embeds_all,
+            encoder_attention_mask = image_atts_all,      
+            return_dict = True,
+            mode = 'fusion',
+        )               
+        
+        # bidirection
 
         vl_embeddings = torch.cat([output_pos.last_hidden_state[:,0,:], output_neg.last_hidden_state[:,0,:]],dim=0)
         vl_output = self.itm_head(vl_embeddings)            
 
-        itm_labels = torch.cat([torch.ones(bs,dtype=torch.long),torch.zeros(2*bs,dtype=torch.long)],
-                               dim=0).to(image.device)
+        itm_labels = torch.cat(
+            [torch.ones(bs,dtype=torch.long),torch.zeros(2*bs,dtype=torch.long)],
+            dim=0).to(image.device)
         loss_itm = F.cross_entropy(vl_output, itm_labels)     
         
         ##================= MLM ========================##                
@@ -189,26 +222,35 @@ class ALBEF(nn.Module):
         labels = input_ids.clone()
 
         probability_matrix = torch.full(labels.shape, self.mlm_probability)                    
-        input_ids, labels = self.mask(input_ids, self.text_encoder.config.vocab_size, image.device, targets=labels,
-                                      probability_matrix = probability_matrix) 
+        input_ids, labels = self.mask(
+            input_ids, 
+            self.text_encoder.config.vocab_size, 
+            image.device, 
+            targets=labels,
+            probability_matrix = probability_matrix
+        ) 
         
         with torch.no_grad():
-            logits_m = self.text_encoder_m(input_ids, 
-                                           attention_mask = text.attention_mask,
-                                           encoder_hidden_states = image_embeds_m,
-                                           encoder_attention_mask = image_atts,      
-                                           return_dict = True,
-                                           return_logits = True,   
-                                          )    
-        mlm_output = self.text_encoder(input_ids, 
-                                       attention_mask = text.attention_mask,
-                                       encoder_hidden_states = image_embeds,
-                                       encoder_attention_mask = image_atts,      
-                                       return_dict = True,
-                                       labels = labels,   
-                                       soft_labels = F.softmax(logits_m,dim=-1),
-                                       alpha = alpha
-                                      )                           
+            logits_m = self.text_encoder_m(
+                input_ids, 
+                attention_mask = text.attention_mask,
+                encoder_hidden_states = image_embeds_m,
+                encoder_attention_mask = image_atts,      
+                return_dict = True,
+                return_logits = True,   
+            )
+                
+        mlm_output = self.text_encoder(
+            input_ids, 
+            attention_mask = text.attention_mask,
+            encoder_hidden_states = image_embeds,
+            encoder_attention_mask = image_atts,      
+            return_dict = True,
+            labels = labels,   
+            soft_labels = F.softmax(logits_m,dim=-1),
+            alpha = alpha
+        )   
+                                
         loss_mlm = mlm_output.loss        
 
         return loss_mlm, loss_ita, loss_itm  
@@ -258,7 +300,7 @@ class ALBEF(nn.Module):
         masked_indices[input_ids == self.tokenizer.cls_token_id] = False
         
         if targets is not None:
-            targets[~masked_indices] = -100 # We only compute loss on masked tokens            
+            targets[~masked_indices] = -100; # We only compute loss on masked tokens            
 
         # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
         indices_replaced = torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
@@ -268,6 +310,7 @@ class ALBEF(nn.Module):
         indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
         random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(device)
         input_ids[indices_random] = random_words[indices_random]                     
+        
         # The rest of the time (10% of the time) we keep the masked input tokens unchanged   
         
         if targets is not None:

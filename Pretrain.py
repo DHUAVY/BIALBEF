@@ -56,7 +56,7 @@ def train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device,
   
         image = image.to(device,non_blocking=True) 
 
-        text_input = tokenizer(text, padding='longest', truncation=True, max_length=25, return_tensors="pt").to(device)  
+        text_input = tokenizer(text, padding='longest', truncation=True, max_length=64, return_tensors="pt").to(device)  
         
         if epoch>0:
             alpha = config['alpha']
@@ -111,7 +111,13 @@ def main(args, config):
     else:
         samplers = [None]
 
-    data_loader = create_loader(datasets,samplers,batch_size=[config['batch_size']], num_workers=[4], is_trains=[True], collate_fns=[None])[0]
+    data_loader = create_loader(
+        datasets,
+        samplers,
+        batch_size=[config['batch_size']], 
+        num_workers=[4], 
+        is_trains=[True], 
+        collate_fns=[None])[0]
 
     tokenizer = BertTokenizer.from_pretrained(args.text_encoder)
 
@@ -157,9 +163,10 @@ def main(args, config):
             
         train_stats = train(model, data_loader, optimizer, tokenizer, epoch, warmup_steps, device, lr_scheduler, config) 
         if utils.is_main_process():  
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         'epoch': epoch,
-                        }                     
+            log_stats = {
+                **{f'train_{k}': v for k, v in train_stats.items()},
+                'epoch': epoch,
+            }                     
             save_obj = {
                 'model': model_without_ddp.state_dict(),
                 'optimizer': optimizer.state_dict(),
