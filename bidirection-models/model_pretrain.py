@@ -1,13 +1,7 @@
-'''
- * Copyright (c) 2021, salesforce.com, inc.
- * All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- * For full license text, see LICENSE.txt file in the repo root or https://opensource.org/licenses/BSD-3-Clause
-'''
-
 from functools import partial
 from models.vit import VisionTransformer, interpolate_pos_embed
 from models.xbert import BertConfig, BertForMaskedLM
+from CKA import CKALoss
 
 import torch
 import torch.nn.functional as F
@@ -17,7 +11,7 @@ import numpy as np
 import random
 
 
-class ALBEF(nn.Module):
+class BIALBEF(nn.Module):
     def __init__(
         self,                 
         text_encoder = None,
@@ -59,10 +53,7 @@ class ALBEF(nn.Module):
         vision_width = config['vision_width']       
         bert_config = BertConfig.from_json_file(config['bert_config'])
         
-        self.text_encoder = BertForMaskedLM.from_pretrained(
-                                text_encoder, 
-                                config=bert_config
-                            )      
+        self.text_encoder = BertForMaskedLM.from_pretrained(text_encoder, config=bert_config)      
 
         text_width = self.text_encoder.config.hidden_size
         self.vision_proj = nn.Linear(vision_width, embed_dim)
@@ -153,13 +144,19 @@ class ALBEF(nn.Module):
         loss_i2t = -torch.sum(F.log_softmax(sim_i2t, dim=1)*sim_i2t_targets,dim=1).mean()
         loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1)*sim_t2i_targets,dim=1).mean() 
 
-        loss_ita = (loss_i2t+loss_t2i)/2
+        # CKA loss
+        cka = CKALoss(text_feat, image_feat, lambda_CKA = 0.01)
+        loss_cka = cka.CKA()
+
+        loss_ita = (loss_i2t+loss_t2i)/2 - 0.01 * loss_cka
 
         self._dequeue_and_enqueue(image_feat_m, text_feat_m)
 
         ###=================================###
         # forward the positve image-text pair
-        output_pos = self.text_encoder.bert(
+
+        # text as the query and image as the key-value pair
+        output_pos_tqi = self.text_encoder.bert(
             encoder_embeds = text_embeds, 
             attention_mask = text.attention_mask,
             encoder_hidden_states = image_embeds,
@@ -167,6 +164,16 @@ class ALBEF(nn.Module):
             return_dict = True,
             mode = 'fusion',
         )            
+
+        # image as the query and text as the key-value pair
+        output_pos_iqt = self.text_encoder.bert(
+            encoder_embeds = image_embeds,
+            attention_mask = image_atts,
+            encoder_hidden_states = text_embeds, 
+            encoder_attention_mask = text.attention_mask,  
+            return_dict = True,
+            mode = 'fusion',
+        )             
         
         with torch.no_grad():
             bs = image.size(0)          
@@ -199,7 +206,7 @@ class ALBEF(nn.Module):
         image_embeds_all = torch.cat([image_embeds_neg,image_embeds],dim=0)
         image_atts_all = torch.cat([image_atts,image_atts],dim=0)
 
-        output_neg = self.text_encoder.bert(
+        output_neg_tqi = self.text_encoder.bert(
             encoder_embeds = text_embeds_all, 
             attention_mask = text_atts_all,
             encoder_hidden_states = image_embeds_all,
@@ -207,22 +214,37 @@ class ALBEF(nn.Module):
             return_dict = True,
             mode = 'fusion',
         )               
-        
-        # bidirection
 
-        vl_embeddings = torch.cat([output_pos.last_hidden_state[:,0,:], output_neg.last_hidden_state[:,0,:]],dim=0)
-        vl_output = self.itm_head(vl_embeddings)            
+        output_neg_iqt = self.text_encoder.bert(
+            encoder_embeds = image_embeds_all,
+            attention_mask = image_atts_all,  
+            encoder_hidden_states = text_embeds_all, 
+            encoder_attention_mask = text_atts_all,
+            return_dict = True,
+            mode = 'fusion',
+        )          
+        
+        vl_embeddings_tqi = torch.cat([output_pos_tqi.last_hidden_state[:,0,:], output_neg_tqi.last_hidden_state[:,0,:]],dim=0)
+        vl_output_tqi = self.itm_head(vl_embeddings_tqi)  
+
+        vl_embeddings_iqt = torch.cat([output_pos_iqt.last_hidden_state[:,0,:], output_neg_iqt.last_hidden_state[:,0,:]],dim=0)
+        vl_output_iqt = self.itm_head(vl_embeddings_iqt)            
 
         itm_labels = torch.cat(
             [torch.ones(bs,dtype=torch.long),torch.zeros(2*bs,dtype=torch.long)],
             dim=0).to(image.device)
-        loss_itm = F.cross_entropy(vl_output, itm_labels)     
+        
+        loss_itm_tqi = F.cross_entropy(vl_output_tqi, itm_labels)    
+        loss_itm_iqt = F.cross_entropy(vl_output_iqt, itm_labels) 
+
+        loss_itm = (loss_itm_tqi + loss_itm_iqt) / 2
         
         ##================= MLM ========================##                
         input_ids = text.input_ids.clone()
         labels = input_ids.clone()
 
         probability_matrix = torch.full(labels.shape, self.mlm_probability)                    
+        
         input_ids, labels = self.mask(
             input_ids, 
             self.text_encoder.config.vocab_size, 
@@ -308,9 +330,10 @@ class ALBEF(nn.Module):
         input_ids[indices_replaced] = self.tokenizer.mask_token_id
 
         # 10% of the time, we replace masked input tokens with random word
-        indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-        random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(device)
-        input_ids[indices_random] = random_words[indices_random]                     
+        if vocab_size is not None:
+            indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+            random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(device)
+            input_ids[indices_random] = random_words[indices_random]                     
         
         # The rest of the time (10% of the time) we keep the masked input tokens unchanged   
         
