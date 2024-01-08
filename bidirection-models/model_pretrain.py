@@ -25,6 +25,7 @@ class BIALBEF(nn.Module):
         
         self.tokenizer = tokenizer 
         self.mlm_probability = config['mlm_probability']
+        self.mim_probability = config['mim_probability']
         embed_dim = config['embed_dim']
      
         self.visual_encoder = VisionTransformer(
@@ -124,8 +125,12 @@ class BIALBEF(nn.Module):
             image_feat_m = F.normalize(self.vision_proj_m(image_embeds_m[:,0,:]),dim=-1)  
             image_feat_all = torch.cat([image_feat_m.t(),self.image_queue.clone().detach()],dim=1)                                         
             
-            text_output_m = self.text_encoder_m.bert(text.input_ids, attention_mask = text.attention_mask,                      
-                                                return_dict = True, mode = 'text')    
+            text_output_m = self.text_encoder_m.bert(
+                text.input_ids, 
+                attention_mask = text.attention_mask,                      
+                return_dict = True, 
+                mode = 'text'
+            )    
             text_feat_m = F.normalize(self.text_proj_m(text_output_m.last_hidden_state[:,0,:]),dim=-1) 
             text_feat_all = torch.cat([text_feat_m.t(),self.text_queue.clone().detach()],dim=1)
 
@@ -270,11 +275,19 @@ class BIALBEF(nn.Module):
             encoder_attention_mask = image_atts,      
             return_dict = True,
             labels = labels,   
-            soft_labels = F.softmax(logits_m,dim=-1),
+            soft_labels = F.softmax(logits_m, dim=-1),
             alpha = alpha
         )   
                                 
         loss_mlm = mlm_output.loss        
+
+        ##================= MIM ========================##  
+        image_input_ids = image_embeds.clone()
+        image_labels = image_input_ids.clone()
+
+        bool_masked_pos = torch.randint(low=0, high=2, size=(1, self.visual_encoder.patch_embed.num_patches)).bool()
+
+        
 
         return loss_mlm, loss_ita, loss_itm  
 
